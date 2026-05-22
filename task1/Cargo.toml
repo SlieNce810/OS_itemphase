@@ -1,0 +1,21 @@
+[package]
+name = "crawler"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "process_crawler"
+path = "src/bin/process_crawler.rs"
+
+[[bin]]
+name = "thread_crawler"
+path = "src/bin/thread_crawler.rs"
+
+[[bin]]
+name = "async_crawler"
+path = "src/bin/async_crawler.rs"
+
+[dependencies]
+ureq = { version = "2.12", features = ["tls"] }
+tokio = { version = "1", features = ["full"] }
+regex = "1"
