@@ -7,9 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
-#[path = "../schools.rs"]
-mod schools;
-use schools::{SchoolInfo, SCHOOLS};
+use crawler::schools::{SchoolInfo, SCHOOLS};
 
 /// 获取当前进程的内存使用量 (RSS, KB)
 fn current_rss_kb() -> usize {
@@ -29,11 +27,22 @@ fn current_rss_kb() -> usize {
 
 /// 将HTML转换为纯文本（去除HTML标签、脚本、样式）
 fn html_to_text(html: &str) -> String {
-    let re = regex::RegexBuilder::new(r"<(script|style|noscript)[^>]*?>[\s\S]*?</\1>")
+    // Rust 的 regex crate 不支持反向引用(\1)，改用三个独立正则
+    let re_script = regex::RegexBuilder::new(r"<script[^>]*?>[\s\S]*?</script>")
         .case_insensitive(true)
         .build()
         .unwrap();
-    let no_script = re.replace_all(html, "");
+    let re_style = regex::RegexBuilder::new(r"<style[^>]*?>[\s\S]*?</style>")
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+    let re_noscript = regex::RegexBuilder::new(r"<noscript[^>]*?>[\s\S]*?</noscript>")
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+    let no_script = re_script.replace_all(html, "");
+    let no_script = re_style.replace_all(&no_script, "");
+    let no_script = re_noscript.replace_all(&no_script, "");
 
     let tag_re = regex::Regex::new(r"<[^>]*>").unwrap();
     let no_tags = tag_re.replace_all(&no_script, "");
@@ -150,6 +159,7 @@ async fn main() {
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         dir.pop();
         dir.push("Docs");
+        dir.push("高校名称和官方网站");
         dir
     };
     fs::create_dir_all(&output_dir).expect("无法创建输出目录");
