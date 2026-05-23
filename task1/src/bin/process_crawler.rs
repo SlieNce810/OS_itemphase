@@ -1,96 +1,53 @@
-/// 基于进程的爬虫程序
-/// 为每个学校URL启动一个子进程（curl）进行HTTP请求，
-/// 各进程独立运行，拥有独立的地址空间和内存。
+// ========================================================================
+// 基于进程的爬虫程序
+// ========================================================================
+// 核心思路：每爬一个学校，就启动一个操作系统子进程（调用 curl 命令）。
+// 各子进程拥有独立的地址空间和内存，进程间互不干扰。
+// 代价：创建进程开销大，但隔离性最好。
+// ========================================================================
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use crawler::common::{current_rss_kb, html_to_text, print_latency_stats, print_memory_stats};
 use crawler::schools::{SchoolInfo, SCHOOLS};
 
-/// 获取当前进程的内存使用量 (RSS, KB)
-fn current_rss_kb() -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines().find_map(|line| {
-                if line.starts_with("VmRSS:") {
-                    line.split_whitespace().nth(1).and_then(|v| v.parse().ok())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or(0)
-}
-
-/// 将HTML转换为纯文本（去除HTML标签、脚本、样式）
-fn html_to_text(html: &str) -> String {
-    // Rust 的 regex crate 不支持反向引用(\1)，改用三个独立正则
-    let re_script = regex::RegexBuilder::new(r"<script[^>]*?>[\s\S]*?</script>")
-        .case_insensitive(true)
-        .build()
-        .unwrap();
-    let re_style = regex::RegexBuilder::new(r"<style[^>]*?>[\s\S]*?</style>")
-        .case_insensitive(true)
-        .build()
-        .unwrap();
-    let re_noscript = regex::RegexBuilder::new(r"<noscript[^>]*?>[\s\S]*?</noscript>")
-        .case_insensitive(true)
-        .build()
-        .unwrap();
-    let no_script = re_script.replace_all(html, "");
-    let no_script = re_style.replace_all(&no_script, "");
-    let no_script = re_noscript.replace_all(&no_script, "");
-
-    let tag_re = regex::Regex::new(r"<[^>]*>").unwrap();
-    let no_tags = tag_re.replace_all(&no_script, "");
-
-    let entity_re = regex::Regex::new(r"&[a-zA-Z]+;|&#\d+;|&#x[0-9a-fA-F]+;").unwrap();
-    let text = entity_re.replace_all(&no_tags, " ");
-
-    // 合并多余空白
-    let ws_re = regex::Regex::new(r"[ \t]+").unwrap();
-    let compact = ws_re.replace_all(&text, " ");
-    let nl_re = regex::Regex::new(r"\n{3,}").unwrap();
-    let result = nl_re.replace_all(&compact, "\n\n");
-
-    result.trim().to_string()
-}
-
-/// 爬取单个学校URL（在子进程中执行）
+/// 爬取单个学校的网页内容
+///
+/// 返回值：(耗时ms, 是否成功, 文本长度字节)
 fn crawl_one(school: &SchoolInfo, output_dir: &PathBuf) -> (f64, bool, usize) {
     let start = Instant::now();
 
-    // 使用curl命令下载网页内容
     let output = Command::new("curl")
-        .arg("-s")                     // silent mode
-        .arg("-L")                     // follow redirects
-        .arg("--max-time").arg("30")   // 30秒超时
-        .arg("-A").arg("Mozilla/5.0 (compatible; Crawler/1.0)")  // User-Agent
+        .arg("-s")                     // 静默模式，不输出进度条
+        .arg("-L")                     // 自动跟随重定向（很多高校网站会跳转）
+        .arg("--max-time").arg("30")   // 最多等30秒，防止卡死
+        .arg("-A").arg("Mozilla/5.0 (compatible; Crawler/1.0)")  // 伪装浏览器
         .arg(&school.url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())        // 捕获下载内容
+        .stderr(Stdio::null())         // 丢弃错误信息
         .output();
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match output {
         Ok(output) if output.status.success() => {
+            // curl 成功：HTML 转纯文本，保存到文件
             let html = String::from_utf8_lossy(&output.stdout).to_string();
             let text = html_to_text(&html);
             let content_len = text.len();
 
-            // 保存纯文本到文件（文件名为学校中文名称）
             let filepath = output_dir.join(format!("{}.txt", school.name));
-            if let Err(e) = fs::write(&filepath, &text) {
-                eprintln!("  写入文件失败 {}: {}", school.name, e);
+            if let Err(error) = fs::write(&filepath, &text) {
+                eprintln!("  写入文件失败 {}: {}", school.name, error);
                 (elapsed_ms, false, 0)
             } else {
                 (elapsed_ms, true, content_len)
             }
         }
         _ => {
+            // curl 失败：网络不通、超时、DNS解析失败等
             eprintln!("  curl请求失败: {}", school.name);
             (elapsed_ms, false, 0)
         }
@@ -101,10 +58,10 @@ fn main() {
     let start_total = Instant::now();
     let mem_before = current_rss_kb();
 
-    // 确定输出目录
+    // --- 准备输出目录 ---
     let output_dir = {
         let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        dir.pop(); // 回到项目根目录 OS_itemphase
+        dir.pop(); // 退到项目根目录 OS_itemphase
         dir.push("Docs");
         dir.push("高校名称和官方网站");
         dir
@@ -118,6 +75,7 @@ fn main() {
     println!("输出目录: {}", output_dir.display());
     println!();
 
+    // --- 逐个爬取 ---
     let mut total_success = 0usize;
     let mut total_fail = 0usize;
     let mut latencies: Vec<f64> = Vec::new();
@@ -141,10 +99,7 @@ fn main() {
     let total_time = start_total.elapsed();
     let mem_after = current_rss_kb();
 
-    // 统计信息
-    let mut sorted = latencies.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
+    // --- 打印统计结果 ---
     println!();
     println!("========================================");
     println!("           性能统计");
@@ -160,31 +115,8 @@ fn main() {
                  0.0
              });
 
-    if !sorted.is_empty() {
-        let sum: f64 = sorted.iter().sum();
-        let avg = sum / sorted.len() as f64;
-        let min = sorted.first().unwrap();
-        let max = sorted.last().unwrap();
-        let med = sorted[sorted.len() / 2];
-        let p95_idx = ((sorted.len() as f64) * 0.95).ceil() as usize - 1;
-        let p95 = sorted[p95_idx.min(sorted.len() - 1)];
-
-        println!();
-        println!("延迟分布 (ms):");
-        println!("  最小值:  {:.2}", min);
-        println!("  平均值:  {:.2}", avg);
-        println!("  中位数:  {:.2}", med);
-        println!("  P95:     {:.2}", p95);
-        println!("  最大值:  {:.2}", max);
-    }
-
-    println!();
-    println!("内存开销 (RSS):");
-    println!("  爬取前:  {} KB ({:.1} MB)", mem_before, mem_before as f64 / 1024.0);
-    println!("  爬取后:  {} KB ({:.1} MB)", mem_after, mem_after as f64 / 1024.0);
-    println!("  增量:    {} KB ({:.1} MB)",
-             mem_after.saturating_sub(mem_before),
-             mem_after.saturating_sub(mem_before) as f64 / 1024.0);
+    print_latency_stats(&latencies);
+    print_memory_stats(mem_before, mem_after);
 
     println!();
     println!("所有纯文本文件已保存至: {}", output_dir.display());
