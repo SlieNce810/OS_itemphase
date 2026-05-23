@@ -1,0 +1,5 @@
+# 忽略爬虫输出的纯文本文件
+Docs/高校名称和官方网站/*.txt
+task1/target
+.claude
+CLAUDE.md
